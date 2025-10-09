@@ -18,12 +18,13 @@ enum Subject {
 }
 
 type Companion = Models.DocumentList<Models.Document> & {
-  $id: string;
+  id: string;
   name: string;
   subject: Subject;
   topic: string;
   duration: number;
   bookmarked: boolean;
+  title?: string; // Add this if you need it
 };
 
 interface CreateCompanion {
@@ -79,4 +80,20 @@ interface CompanionComponentProps {
   userImage: string;
   voice: string;
   style: string;
+}
+
+// Add the Message type for VAPI
+interface Message {
+  type:
+    | "transcript"
+    | "function-call"
+    | "function-call-result"
+    | "status"
+    | "tool-calls"
+    | "audio"
+    | "conversation-update";
+  role?: "user" | "system" | "assistant";
+  transcript?: string;
+  transcriptType?: "partial" | "final";
+  // Add other properties that might be needed based on VAPI SDK
 }

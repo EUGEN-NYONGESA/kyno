@@ -1,141 +1,210 @@
-'use server';
+"use server";
 
-import {auth} from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
+import { createSupabaseClient } from "@/lib/supabase";
 import { revalidatePath } from "next/cache";
-import { createSupabaseClient } from "../supabase";
 
 export const createCompanion = async (formData: CreateCompanion) => {
-    const { userId: author } = await auth();
-    const supabase = createSupabaseClient();
+  const { userId: author } = await auth();
+  const supabase = createSupabaseClient();
 
-    const { data, error } = await supabase
-        .from('companions')
-        .insert({...formData, author })
-        .select();
+  const { data, error } = await supabase
+    .from("companions")
+    .insert({ ...formData, author })
+    .select();
 
-    if(error || !data) throw new Error(error?.message || 'Failed to create a companion');
+  if (error || !data)
+    throw new Error(error?.message || "Failed to create a companion");
 
-    return data[0];
-}
+  return data[0];
+};
 
-export const getAllCompanions = async ({ limit = 10, page = 1, subject, topic }: GetAllCompanions) => {
-    const supabase = createSupabaseClient();
+export const getAllCompanions = async ({
+  limit = 10,
+  page = 1,
+  subject,
+  topic,
+}: GetAllCompanions) => {
+  const supabase = createSupabaseClient();
 
-    let query = supabase.from('companions').select();
+  // Use a simple string without comments or multi-line formatting
+  let query = supabase.from("companions").select(`
+    id, 
+    name, 
+    subject, 
+    topic, 
+    duration,
+    author,
+    created_at
+  `);
 
-    if(subject && topic) {
-        query = query.ilike('subject', `%${subject}%`)
-            .or(`topic.ilike.%${topic}%,name.ilike.%${topic}%`)
-    } else if(subject) {
-        query = query.ilike('subject', `%${subject}%`)
-    } else if(topic) {
-        query = query.or(`topic.ilike.%${topic}%,name.ilike.%${topic}%`)
-    }
+  if (subject && topic) {
+    query = query
+      .ilike("subject", `%${subject}%`)
+      .or(`topic.ilike.%${topic}%,name.ilike.%${topic}%`);
+  } else if (subject) {
+    query = query.ilike("subject", `%${subject}%`);
+  } else if (topic) {
+    query = query.or(`topic.ilike.%${topic}%,name.ilike.%${topic}%`);
+  }
 
-    query = query.range((page - 1) * limit, page * limit - 1);
+  query = query.range((page - 1) * limit, page * limit - 1);
 
-    const { data: companions, error } = await query;
+  const { data: companions, error } = await query;
 
-    if(error) throw new Error(error.message);
+  if (error) {
+    console.error("Database error:", error);
+    // Return empty array instead of throwing to prevent page crash
+    return [];
+  }
 
-    return companions;
-}
+  // Add default bookmarked value if the column doesn't exist
+  return (
+    companions?.map((companion) => ({
+      ...companion,
+      bookmarked: false, // Default value
+    })) || []
+  );
+};
 
 export const getCompanion = async (id: string) => {
-    const supabase = createSupabaseClient();
+  const supabase = createSupabaseClient();
 
-    const { data, error } = await supabase
-        .from('companions')
-        .select()
-        .eq('id', id);
+  // First try to find by UUID (normal ID)
+  let { data, error } = await supabase.from("companions").select().eq("id", id);
 
-    if(error) return console.log(error);
+  // If not found by UUID, try to find by name slug
+  if (!data || data.length === 0 || error) {
+    const { data: slugData, error: slugError } = await supabase
+      .from("companions")
+      .select()
+      .ilike("name", `%${id.replace(/-/g, " ")}%`); // Convert "my-journey" to "my journey"
 
-    return data[0];
-}
+    if (slugError) {
+      console.log(slugError);
+      throw new Error(`Companion not found: ${slugError.message}`);
+    }
+
+    if (!slugData || slugData.length === 0) {
+      throw new Error("Companion not found");
+    }
+
+    data = slugData;
+    error = slugError;
+  }
+
+  if (error) {
+    console.log(error);
+    throw new Error(error.message);
+  }
+
+  if (!data || data.length === 0) {
+    throw new Error("Companion not found");
+  }
+
+  return data[0];
+};
 
 export const addToSessionHistory = async (companionId: string) => {
-    const { userId } = await auth();
-    const supabase = createSupabaseClient();
-    const { data, error } = await supabase.from('session_history')
-        .insert({
-            companion_id: companionId,
-            user_id: userId,
-        })
+  const { userId } = await auth();
+  const supabase = createSupabaseClient();
+  const { data, error } = await supabase.from("session_history").insert({
+    companion_id: companionId,
+    user_id: userId,
+  });
 
-    if(error) throw new Error(error.message);
+  if (error) throw new Error(error.message);
 
-    return data;
-}
+  return data;
+};
 
 export const getRecentSessions = async (limit = 10) => {
-    const supabase = createSupabaseClient();
-    const { data, error } = await supabase
-        .from('session_history')
-        .select(`companions:companion_id (*)`)
-        .order('created_at', { ascending: false })
-        .limit(limit)
+  const supabase = createSupabaseClient();
+  const { data, error } = await supabase
+    .from("session_history")
+    .select(`companions:companion_id (*)`)
+    .order("created_at", { ascending: false })
+    .limit(limit);
 
-    if(error) throw new Error(error.message);
+  if (error) throw new Error(error.message);
 
-    return data.map(({ companions }) => companions);
-}
+  // Remove duplicate companions by ID
+  const uniqueCompanions = data.reduce((acc, { companions }) => {
+    if (companions && !acc.find((comp) => comp.id === companions.id)) {
+      acc.push(companions);
+    }
+    return acc;
+  }, []);
+
+  return uniqueCompanions;
+};
 
 export const getUserSessions = async (userId: string, limit = 10) => {
-    const supabase = createSupabaseClient();
-    const { data, error } = await supabase
-        .from('session_history')
-        .select(`companions:companion_id (*)`)
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
-        .limit(limit)
+  const supabase = createSupabaseClient();
+  const { data, error } = await supabase
+    .from("session_history")
+    .select(`companions:companion_id (*)`)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
 
-    if(error) throw new Error(error.message);
+  if (error) throw new Error(error.message);
 
-    return data.map(({ companions }) => companions);
-}
+  return data.map(({ companions }) => companions);
+};
 
 export const getUserCompanions = async (userId: string) => {
-    const supabase = createSupabaseClient();
-    const { data, error } = await supabase
-        .from('companions')
-        .select()
-        .eq('author', userId)
+  const supabase = createSupabaseClient();
+  const { data, error } = await supabase
+    .from("companions")
+    .select()
+    .eq("author", userId);
 
-    if(error) throw new Error(error.message);
+  if (error) throw new Error(error.message);
 
-    return data;
-}
+  return data;
+};
 
 export const newCompanionPermissions = async () => {
-    const { userId, has } = await auth();
-    const supabase = createSupabaseClient();
+  const { userId, has } = await auth();
 
-    let limit = 0;
+  // If no user, they can't create companions
+  if (!userId) return false;
 
-    if(has({ plan: 'pro' })) {
-        return true;
-    } else if(has({ feature: "3_companion_limit" })) {
-        limit = 3;
-    } else if(has({ feature: "10_companion_limit" })) {
-        limit = 10;
-    }
+  const supabase = createSupabaseClient();
 
-    const { data, error } = await supabase
-        .from('companions')
-        .select('id', { count: 'exact' })
-        .eq('author', userId)
+  let limit = 5; // Default free tier limit should be 5, not 0
 
-    if(error) throw new Error(error.message);
+  // Check for Pro plan first (unlimited)
+  if (has({ plan: "pro_companion" })) {
+    return true;
+  }
+  // Check for Core Learner plan (10 companions)
+  else if (has({ plan: "core_learner" })) {
+    limit = 10;
+  }
+  // Check for specific features if plans don't work
+  else if (has({ feature: "unlimited_companions" })) {
+    return true;
+  } else if (has({ feature: "10_companions_limit" })) {
+    limit = 10;
+  } else if (has({ feature: "5_companions_limit" })) {
+    limit = 5; // This should be 5, not 3
+  }
+  // Default (free/Basic plan) is already set to 5
 
-    const companionCount = data?.length;
+  const { data, error } = await supabase
+    .from("companions")
+    .select("id", { count: "exact" })
+    .eq("author", userId);
 
-    if(companionCount >= limit) {
-        return false
-    } else {
-        return true;
-    }
-}
+  if (error) throw new Error(error.message);
+
+  const companionCount = data?.length || 0;
+
+  // Return true if user hasn't reached their limit, false if they have
+  return companionCount < limit;
+};
 
 // Bookmarks
 export const addBookmark = async (companionId: string, path: string) => {
